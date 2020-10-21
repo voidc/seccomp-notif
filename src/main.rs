@@ -1,4 +1,5 @@
 use nix::cmsg_space;
+use nix::errno::Errno;
 use nix::libc;
 use nix::sys::socket;
 use nix::sys::socket::{
@@ -87,6 +88,27 @@ fn read_process_memory(pid: u32, offset: u64) -> Vec<u8> {
     let nread = mem.read_at(&mut buf, offset).unwrap();
     buf.truncate(nread);
     buf
+}
+
+unsafe fn pidfd_open(pid: libc::pid_t, flags: libc::c_uint) -> libc::c_int {
+    libc::syscall(libc::SYS_pidfd_open, pid, flags) as _
+}
+
+unsafe fn pidfd_getfd(
+    pidfd: libc::c_int,
+    targetfd: libc::c_int,
+    flags: libc::c_uint,
+) -> libc::c_int {
+    #[allow(non_upper_case_globals)]
+    const SYS_pidfd_getfd: libc::c_long = 438;
+    libc::syscall(SYS_pidfd_getfd, pidfd, targetfd, flags) as _
+}
+
+fn get_process_fd(pid: u32, target_fd: i32) -> nix::Result<RawFd> {
+    let pid_fd = Errno::result(unsafe { pidfd_open(pid as _, 0) })?;
+    let res = Errno::result(unsafe { pidfd_getfd(pid_fd, target_fd, 0) })?;
+    close(pid_fd)?;
+    Ok(res)
 }
 
 fn main() {
