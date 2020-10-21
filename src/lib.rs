@@ -1,17 +1,12 @@
-//! Links:
-//!
-//!
 use nix::errno::Errno;
 use nix::libc;
 use nix::unistd::close;
+use std::fmt;
 use std::mem::MaybeUninit;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use sys::*;
 
 mod sys;
-
-pub use sys::seccomp_notif as Notif;
-pub use sys::seccomp_notif_resp as NotifResp;
 
 #[repr(u32)]
 pub enum FilterAction {
@@ -82,26 +77,33 @@ pub struct NotifyFd {
 }
 
 impl NotifyFd {
-    pub fn recv(&self) -> nix::Result<Notif> {
+    pub fn recv(&self) -> nix::Result<Notification> {
         let mut res = MaybeUninit::zeroed();
-        unsafe {
-            seccomp_notif_recv(self.fd, res.as_mut_ptr())?;
-            Ok(res.assume_init())
-        }
+        let notif = unsafe {
+            seccomp_notif_ioctl_recv(self.fd, res.as_mut_ptr())?;
+            res.assume_init()
+        };
+
+        Ok(Notification { notif, fd: &self })
     }
 
-    pub fn send(&self, res: NotifResp) -> nix::Result<()> {
-        let mut res = res;
+    fn send(&self, mut res: seccomp_notif_resp) -> nix::Result<()> {
         unsafe {
-            seccomp_notif_send(self.fd, &mut res as *mut _)?;
+            seccomp_notif_ioctl_send(self.fd, &mut res as *mut _)?;
         }
         Ok(())
     }
 
-    pub fn check_id(&self, id: u64) -> nix::Result<()> {
-        let mut id = id;
+    fn check_id(&self, id: u64) -> nix::Result<()> {
         unsafe {
-            seccomp_notif_id_valid(self.fd, &mut id as *mut _)?;
+            seccomp_notif_ioctl_id_valid(self.fd, &id as *const _)?;
+        }
+        Ok(())
+    }
+
+    fn add_fd(&self, addfd: seccomp_notif_addfd) -> nix::Result<()> {
+        unsafe {
+            seccomp_notif_ioctl_addfd(self.fd, &addfd as *const _)?;
         }
         Ok(())
     }
@@ -130,5 +132,72 @@ impl IntoRawFd for NotifyFd {
 impl AsRawFd for NotifyFd {
     fn as_raw_fd(&self) -> RawFd {
         self.fd
+    }
+}
+
+pub struct Notification<'f> {
+    notif: seccomp_notif,
+    fd: &'f NotifyFd,
+}
+
+impl<'f> Notification<'f> {
+    pub fn as_raw(&self) -> &seccomp_notif {
+        &self.notif
+    }
+
+    pub fn reply_success(self, val: i64) -> nix::Result<()> {
+        let resp = seccomp_notif_resp {
+            id: self.notif.id,
+            val,
+            error: 0,
+            flags: 0,
+        };
+
+        self.fd.send(resp)
+    }
+
+    pub fn reply_success_fd(self, fd: RawFd) -> nix::Result<()> {
+        let addfd = seccomp_notif_addfd {
+            id: self.notif.id,
+            flags: 0,
+            srcfd: fd as _,
+            newfd: 0,
+            newfd_flags: 0,
+        };
+
+        self.fd.add_fd(addfd)?;
+        self.reply_success(fd as _)
+    }
+
+    pub fn reply_error(self, errno: i32) -> nix::Result<()> {
+        let resp = seccomp_notif_resp {
+            id: self.notif.id,
+            val: 0,
+            error: -errno,
+            flags: 0,
+        };
+
+        self.fd.send(resp)
+    }
+
+    pub fn reply_continue(self) -> nix::Result<()> {
+        let resp = seccomp_notif_resp {
+            id: self.notif.id,
+            val: 0,
+            error: 0,
+            flags: SECCOMP_USER_NOTIF_FLAG_CONTINUE,
+        };
+
+        self.fd.send(resp)
+    }
+
+    pub fn check(&self) -> nix::Result<()> {
+        self.fd.check_id(self.notif.id)
+    }
+}
+
+impl<'f> fmt::Debug for Notification<'f> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.notif, f)
     }
 }

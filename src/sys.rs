@@ -1,10 +1,11 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 use nix::libc;
-use nix::{ioctl_read, ioctl_readwrite};
+use nix::{ioctl_readwrite, ioctl_write_ptr};
 use std::mem::size_of;
 
 pub const SECCOMP_SET_MODE_FILTER: libc::c_ulong = 1;
+pub const SECCOMP_GET_ACTION_AVAIL: libc::c_ulong = 2;
 pub const SECCOMP_GET_NOTIF_SIZES: libc::c_ulong = 3;
 
 pub const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
@@ -94,6 +95,20 @@ pub struct seccomp_notif_sizes {
     pub seccomp_data: u16,
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct seccomp_notif_addfd {
+    pub id: u64,
+    pub flags: u32,
+    pub srcfd: u32,
+    pub newfd: u32,
+    pub newfd_flags: u32,
+}
+
+/* valid flags for seccomp_notif_addfd */
+/// Specify remote fd
+pub const SECCOMP_ADDFD_FLAG_SETFD: u32 = 1 << 0;
+
 pub unsafe fn seccomp(
     op: libc::c_ulong,
     flags: libc::c_ulong,
@@ -103,15 +118,32 @@ pub unsafe fn seccomp(
 }
 
 const SECCOMP_IOC_MAGIC: u8 = b'!';
-ioctl_readwrite!(seccomp_notif_recv, SECCOMP_IOC_MAGIC, 0, seccomp_notif);
-ioctl_readwrite!(seccomp_notif_send, SECCOMP_IOC_MAGIC, 1, seccomp_notif_resp);
-ioctl_read!(seccomp_notif_id_valid, SECCOMP_IOC_MAGIC, 2, u64);
+ioctl_readwrite!(
+    seccomp_notif_ioctl_recv,
+    SECCOMP_IOC_MAGIC,
+    0,
+    seccomp_notif
+);
+ioctl_readwrite!(
+    seccomp_notif_ioctl_send,
+    SECCOMP_IOC_MAGIC,
+    1,
+    seccomp_notif_resp
+);
+ioctl_write_ptr!(seccomp_notif_ioctl_id_valid, SECCOMP_IOC_MAGIC, 2, u64);
+ioctl_write_ptr!(
+    seccomp_notif_ioctl_addfd,
+    SECCOMP_IOC_MAGIC,
+    3,
+    seccomp_notif_addfd
+);
 
 #[cfg(test)]
 mod tests {
     use crate::sys::{
         seccomp, seccomp_data, seccomp_notif, seccomp_notif_resp, seccomp_notif_sizes,
-        SECCOMP_GET_NOTIF_SIZES,
+        SECCOMP_GET_ACTION_AVAIL, SECCOMP_GET_NOTIF_SIZES, SECCOMP_RET_ALLOW,
+        SECCOMP_RET_KILL_PROCESS, SECCOMP_RET_USER_NOTIF,
     };
     use nix::errno::Errno;
     use std::mem::{size_of, MaybeUninit};
@@ -132,5 +164,24 @@ mod tests {
             sizes.seccomp_notif_resp,
             size_of::<seccomp_notif_resp>() as _
         );
+    }
+
+    fn get_action_avail(action: u32) -> bool {
+        let mut action = action;
+        let res = unsafe {
+            seccomp(
+                SECCOMP_GET_ACTION_AVAIL,
+                0,
+                &mut action as *mut u32 as *mut _,
+            )
+        };
+        Errno::result(res).is_ok()
+    }
+
+    #[test]
+    fn test_action_avail() {
+        assert!(get_action_avail(SECCOMP_RET_KILL_PROCESS));
+        assert!(get_action_avail(SECCOMP_RET_ALLOW));
+        assert!(get_action_avail(SECCOMP_RET_USER_NOTIF));
     }
 }

@@ -7,7 +7,7 @@ use nix::sys::socket::{
 use nix::sys::stat::Mode;
 use nix::sys::uio::IoVec;
 use nix::unistd::{close, fork, mkdir, ForkResult, Pid};
-use seccomp_notif::{Filter, FilterAction, NotifResp, NotifyFd};
+use seccomp_notif::{Filter, FilterAction, NotifyFd};
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -40,7 +40,7 @@ fn recv_fd<F: FromRawFd>(sock: RawFd) -> nix::Result<Option<F>> {
 }
 
 fn spawn_target_process(sock: RawFd) -> nix::Result<Pid> {
-    match fork()? {
+    match unsafe { fork() }? {
         ForkResult::Parent { child } => return Ok(child),
         ForkResult::Child => {}
     }
@@ -65,22 +65,19 @@ fn handle_notifications(notify_fd: NotifyFd) -> nix::Result<()> {
         println!("waiting on next notification");
         let req = notify_fd.recv()?;
         println!("got notification: {:?}", req);
-        assert_eq!(req.data.nr, libc::SYS_mkdir as _);
+
+        let data = &req.as_raw().data;
+        assert_eq!(data.nr, libc::SYS_mkdir as _);
         //assert_eq!(req.data.arch, AUDIT_ARCH_X86_64);
 
-        let mut path = read_process_memory(req.pid, req.data.args[0]);
+        let mut path = read_process_memory(req.as_raw().pid, data.args[0]);
         let path_len = path.iter().position(|c| *c == b'\x00').unwrap();
         path.truncate(path_len);
         let path = String::from_utf8(path)?;
         println!("path: {}", path);
 
-        let resp = NotifResp {
-            id: req.id,
-            val: 0,
-            error: -libc::EPERM,
-            flags: 0,
-        };
-        notify_fd.send(resp)?;
+        req.check()?;
+        req.reply_error(libc::EPERM)?;
     }
 }
 
